@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="robots" content="noindex,nofollow">
+<title>Research Atlas · Private Access</title>
+<style>
+:root{--bg:#f4f5f1;--card:#fffefa;--ink:#1f3638;--muted:#607173;--line:#dbe3de;--accent:#226f75}
+*{box-sizing:border-box}
+body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px;background:var(--bg);color:var(--ink);font:15px/1.6 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif}
+.box{width:100%;max-width:400px;background:var(--card);border:1px solid var(--line);border-radius:16px;padding:26px 24px;box-shadow:0 12px 34px rgba(20,50,52,.08)}
+.eyebrow{font-size:11px;letter-spacing:1.8px;color:var(--accent);font-weight:700}
+h1{margin:8px 0 6px;font-size:22px}
+p{margin:0 0 18px;font-size:13px;color:var(--muted)}
+input[type=password],input[type=text]{width:100%;padding:11px 13px;border:1px solid #c9d6d1;border-radius:10px;font-size:15px;outline:none;background:#fff}
+input:focus{border-color:var(--accent)}
+.row{display:flex;align-items:center;justify-content:space-between;margin:12px 0 16px;font-size:13px;color:var(--muted)}
+label{display:inline-flex;align-items:center;gap:6px;cursor:pointer}
+button{width:100%;padding:11px 14px;border:none;border-radius:10px;background:var(--accent);color:#fff;font-size:14px;font-weight:600;cursor:pointer}
+button:disabled{opacity:.6;cursor:wait}
+.msg{margin-top:12px;font-size:12.5px;min-height:18px;color:#b2433a}
+.msg.ok{color:#1f6a4d}
+.small{margin-top:14px;font-size:11.5px;color:var(--muted);text-align:center}
+.linkbtn{background:none;border:none;color:var(--accent);font-size:12px;width:auto;padding:0;text-decoration:underline;cursor:pointer}
+</style>
+</head>
+<body>
+<div class="box">
+  <div class="eyebrow">ENCRYPTED STATIC ATLAS</div>
+  <h1>请输入阅读口令</h1>
+  <p>页面内容已在本地经 AES-256-GCM 加密，仅在你的浏览器内存中解密，无口令无法查看。</p>
+  <form id="f">
+    <input id="pw" type="password" autocomplete="current-password" placeholder="输入访问口令" required>
+    <div class="row">
+      <label><input id="rem" type="checkbox" checked> 在此设备记住解锁状态</label>
+      <button type="button" class="linkbtn" id="toggleVis">显示</button>
+    </div>
+    <button type="submit" id="btn">解锁并加载页面</button>
+  </form>
+  <div class="msg" id="msg"></div>
+  <div class="small"><button type="button" class="linkbtn" id="clearKey">清除本机已保存口令</button></div>
+</div>
+<script>
+(function(){
+  var ENC_URL = "./index.enc";
+  var SALT_B64 = "PZ7XlXHBSZ/F8qT15HcRhc/Y6HwNBVGAB9AJvfns+D8=";
+  var ITER = 250000;
+  var STORAGE_KEY = 'atlas.enc.rawkey.' + "a0e0ed910e";
+
+  var msgEl = document.getElementById('msg');
+  var btnEl = document.getElementById('btn');
+  var pwEl = document.getElementById('pw');
+  var remEl = document.getElementById('rem');
+
+  function b64ToBytes(b64){
+    var bin = atob(b64), out = new Uint8Array(bin.length);
+    for (var i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    return out;
+  }
+  function bytesToB64(bytes){
+    var s = '';
+    for (var i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
+    return btoa(s);
+  }
+  function setStatus(txt, ok){
+    msgEl.textContent = txt;
+    msgEl.className = ok ? 'msg ok' : 'msg';
+  }
+
+  async function deriveRawKey(password){
+    var baseKey = await crypto.subtle.importKey(
+      'raw', new TextEncoder().encode(password), 'PBKDF2', false, ['deriveBits']
+    );
+    var bits = await crypto.subtle.deriveBits(
+      { name: 'PBKDF2', salt: b64ToBytes(SALT_B64), iterations: ITER, hash: 'SHA-256' },
+      baseKey, 256
+    );
+    return new Uint8Array(bits);
+  }
+
+  async function gunzip(bytes){
+    if (typeof DecompressionStream === 'undefined') {
+      throw new Error('当前浏览器版本过旧，不支持 DecompressionStream，请升级 Safari/Chrome。');
+    }
+    var ds = new DecompressionStream('gzip');
+    var stream = new Blob([bytes]).stream().pipeThrough(ds);
+    return await new Response(stream).text();
+  }
+
+  async function unlockWithRawKey(rawBytes, silentFail){
+    btnEl.disabled = true;
+    setStatus('正在拉取并解密内容…', true);
+    try {
+      var key = await crypto.subtle.importKey('raw', rawBytes, { name: 'AES-GCM' }, false, ['decrypt']);
+      var resp = await fetch(ENC_URL, { cache: 'no-cache' });
+      if (!resp.ok) throw new Error('拉取密文失败: HTTP ' + resp.status);
+      var buf = new Uint8Array(await resp.arrayBuffer());
+      var iv = buf.slice(0, 12);
+      var ct = buf.slice(12);
+      var plainGz = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: iv }, key, ct);
+      var html = await gunzip(new Uint8Array(plainGz));
+      // Inject a small lock button helper on window so user can clear key anytime
+      var lockSnippet = '<script>window.__atlasLock=function(){localStorage.removeItem(' + JSON.stringify(STORAGE_KEY) + ');location.reload();};</' + 'script>';
+      html = html.replace('</body>', lockSnippet + '</body>');
+      document.open();
+      document.write(html);
+      document.close();
+      return true;
+    } catch (e) {
+      btnEl.disabled = false;
+      if (silentFail) {
+        try { localStorage.removeItem(STORAGE_KEY); } catch (_) {}
+        setStatus('本机缓存的口令已失效，请重新输入。', false);
+      } else {
+        setStatus('口令不正确或解密失败：' + (e && e.message ? e.message : e), false);
+      }
+      return false;
+    }
+  }
+
+  document.getElementById('toggleVis').addEventListener('click', function(){
+    var show = pwEl.type === 'password';
+    pwEl.type = show ? 'text' : 'password';
+    this.textContent = show ? '隐藏' : '显示';
+  });
+  document.getElementById('clearKey').addEventListener('click', function(){
+    try { localStorage.removeItem(STORAGE_KEY); } catch (_) {}
+    setStatus('已清除本机保存的解锁密钥。', true);
+  });
+
+  document.getElementById('f').addEventListener('submit', async function(ev){
+    ev.preventDefault();
+    var pw = pwEl.value.trim();
+    if (!pw) return;
+    if (!window.crypto || !crypto.subtle) {
+      setStatus('WebCrypto 需要在 HTTPS 或 localhost 下运行。', false);
+      return;
+    }
+    btnEl.disabled = true;
+    setStatus('正在派生密钥…', true);
+    try {
+      var raw = await deriveRawKey(pw);
+      var ok = await unlockWithRawKey(raw, false);
+      if (ok && remEl.checked) {
+        try { localStorage.setItem(STORAGE_KEY, bytesToB64(raw)); } catch (_) {}
+      }
+    } catch (e) {
+      btnEl.disabled = false;
+      setStatus('派生失败：' + e, false);
+    }
+  });
+
+  // Auto-unlock seamlessly if this device already holds a valid derived key
+  try {
+    var cached = localStorage.getItem(STORAGE_KEY);
+    if (cached && window.crypto && crypto.subtle) {
+      unlockWithRawKey(b64ToBytes(cached), true);
+    }
+  } catch (_) {}
+})();
+</script>
+</body>
+</html>
